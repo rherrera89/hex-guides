@@ -1,6 +1,6 @@
 # SQL & Code Style Guide
 
-Apply these conventions to every SQL query and Python cell you write.
+Apply these conventions to every SQL query and Python cell you write please
 
 ## SQL Formatting
 

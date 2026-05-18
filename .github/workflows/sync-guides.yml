@@ -15,4 +15,4 @@ jobs:
         with:
           hex_api_token: ${{ secrets.HEX_API_TOKEN }}
           publish_guides: true
-          delete_untracked_guides: true
+          delete_untracked_guides: false

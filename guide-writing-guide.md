@@ -136,8 +136,14 @@ watch for wrong answers, and tighten the specific rules that caused them.
 
 ## After you've written your guides
 
-- Add each guide to Hex: Data → Context Studio → Guides → New guide.
-- Optionally version-control guides in GitHub and sync via GitHub Actions.
-- Check **Context Studio → Suggestions** periodically — Hex auto-generates improvement
-  recommendations from conversation patterns and feedback.
+**Getting them into Hex — pick your path:**
+
+- **Right now, manually:** Data → Context Studio → Guides → New guide → paste and save. For workspace context: Settings → AI & agents → Workspace context.
+- **Hex CLI:** Run `hex guide publish` from a repo that contains your guide files and a `hex_context.config.json`. The reserved filename `hex.md` maps to workspace context.
+- **GitHub Actions:** Use `hex-inc/action-context-toolkit` to auto-publish on merge. `hex guide preview` runs on PRs; `hex guide publish` runs on merge to main. Guides become read-only in Hex but version-controlled in Git.
+
+If you're just getting started, paste manually and come back to set up the CLI or GitHub Action once you're iterating regularly.
+
+**Keeping them sharp:**
+- Check **Context Studio → Suggestions** periodically — Hex auto-generates improvement recommendations from conversation patterns and feedback.
 - Run `hex suggestion list` in the CLI to pull suggestions into your terminal and close the loop.

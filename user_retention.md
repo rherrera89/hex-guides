@@ -23,7 +23,6 @@ without approval (see workspace Semantic-First Policy).
 ## Canonical definitions (ask before deviating)
 - Retention: monthly cohorts by month of first qualifying order; retained in
   month N = ≥1 qualifying order that month. Always show cohort sizes.
-- Churn: no qualifying order in the last 90 days.
 - Power Purchaser: >3 qualifying orders in a single calendar month.
 - Active Users: AMBIGUOUS — always ask purchases-only vs purchases-or-returns
   (last 28 days).

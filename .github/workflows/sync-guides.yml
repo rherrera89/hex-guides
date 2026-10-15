@@ -1,18 +1,49 @@
 name: Sync Guides to Hex
 
+# PRs: build a context preview from the branch, run the eval suite against it,
+# and report results on the PR. Pushes to main: publish the context.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: hex-context-${{ github.event.pull_request.number || github.ref }}
+  # Cancel superseded PR eval runs, but never cancel a publish to main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: hex-inc/action-context-toolkit@v1
+      - uses: actions/checkout@v6
+
+      # v2 always prunes guides that no longer match hex_context.config.json.
+      # It only removes guides this repo synced; guides authored in the Hex UI
+      # are not touched (checked with a dry `hex context preview` on 2026-10-15).
+      - name: Preview (PR) / publish (main)
+        id: hex
+        uses: hex-inc/action-context-toolkit@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           token: ${{ secrets.HEX_API_TOKEN }}
-          publish_guides: true
-          delete_untracked_guides: false
+          comment_on_pr: true
+
+      - name: Run evals against the branch preview
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PREVIEW_ID: ${{ steps.hex.outputs.preview_id }}
+          PREVIEW_LINK: ${{ steps.hex.outputs.preview_link }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SUITE_PATH: evals/ecommerce.yaml
+          # Hill-climbing cases: reported on the PR, but they don't fail the check.
+          NON_BLOCKING_CASES: quarterly-planning-synthesis
+        run: .github/scripts/run-evals.sh

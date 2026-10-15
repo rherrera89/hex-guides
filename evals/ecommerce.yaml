@@ -1,0 +1,447 @@
+name: "Ecommerce dataset — baseline & hill-climbing"
+id: ecommerce-baseline-v1
+
+# Target: the ecommerce data in the Demo Snowflake Writeback connection
+# (hex_app_data.A_TEST_SCHEMA). Source of truth = the endorsed semantic model
+# "eCommerce Metrics.orders_view" (Certified Orders), NOT the raw tables.
+# The model is built on DIM_ORDER_STATUS (header grain, 998 distinct orders) and
+# defines total_revenue = SUM(sale_price) filtered to status = 'Complete'.
+# Numeric ground truth below is written as raw SQL that reproduces the model's
+# definitions exactly, so targets stay live and never go stale.
+#
+# FCT_ORDER_INVENTORY is a landmine, not a supported table: 10 rows, and
+# FCT_ORDERS.INVENTORY_ITEM_ID matches 0 of its 10 IDs. An inner join through it
+# returns $0.00 and 0 orders with no error. It is deliberately TARGETED by the
+# dead-table trap below and excluded from every other case.
+#
+# TRAP DESIGN NOTE (2026-08-14): the workspace now lets the agent fall back to
+# SQL when the semantic model can't answer. That means a case which fails only
+# because "the model lacks a measure" now self-heals — the agent just writes the
+# query — so it grades a MODEL gap. Cases marked [GUIDE TRAP] instead fail on
+# knowledge the agent cannot recover from the warehouse on its own (which tables
+# are poisoned, which raw columns lie, what method a good answer follows).
+# SQL access makes those failures more likely, not less. Fix them in guides.
+#
+# TRAP VALIDATION (run 01a00183, 2026-08-14): both guide traps PASSED 3/3, so
+# neither is an open gap — they are now baseline guards, annotated in place.
+# quarterly-planning-synthesis failed 3/3 and is the live hill-climbing item;
+# its two real gaps are unrun-campaign filtering and return-rate calibration.
+# Two of its rubrics were recalibrated after that run for grading narration
+# rather than method — see the notes on each.
+#
+# Model + effort are pinned so runs are reproducible and comparable over time.
+modelSelection:
+  model: CLAUDE_OPUS_5
+  effortLevel: low
+
+# Two groups, per Hex's "designing useful evals" guidance:
+#   BASELINE      — should pass consistently; guards known-good answers.
+#   HILL-CLIMBING — harder / definitional cases the agent may fail today; these
+#                   are the to-do list for context you add next.
+#
+# STATE AFTER THE 2026-08-14 CLEANUP: 11 baseline, 1 hill-climbing. Everything
+# that was passing was moved into baseline, so the split now reflects measured
+# results (run 01a00194, 92%) rather than what each case was originally built
+# to prove. Only quarterly-planning-synthesis still fails.
+#
+# TWO CAVEATS on reading the baseline group as "all green":
+#  - churn-definition verifies the agent reads the pinned 90-day churn window
+#    from user_retention.md and presents it as endorsed. The churn line was
+#    briefly removed (PR #5) and restored (PR #6, 2026-08-14); this case now
+#    guards that the definition stays pinned. If it starts failing, check the
+#    guide still carries the churn line before anything else.
+#  - The two REGRESSION GUARD cases and growth-trend-partial-period were built
+#    as hill-climbing traps and passed unaided. They are guards now, but they
+#    guard against context changes making the agent WORSE, so a failure there
+#    is a real signal, not a stale expectation.
+
+cases:
+  # ────────────────────────── BASELINE ──────────────────────────
+
+  - id: total-customers
+    prompt: "How many customers do we have in the ecommerce dataset?"
+    attempts: 2
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: customers-count-numeric
+        type: numeric_value
+        target:
+          sql: "select count(*) from hex_app_data.A_TEST_SCHEMA.DIM_USERS"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        absoluteTolerance: 0
+      - id: used-dim-users
+        type: judge_thread
+        criterion: "Did the agent count rows in the DIM_USERS customer dimension rather than counting orders or order rows?"
+
+  # REMOVED 2026-08-14: campaign-count ("How many marketing campaigns are
+  # there?", count(*) on DIM_CAMPAIGNS = 25). A single-rubric count over a
+  # dimension table — it guarded nothing that could realistically regress, and
+  # it was quietly ambiguous besides, since several of those 25 campaigns have
+  # STATUS = 'Planned' and never ran. Replaced by growth-trend-partial-period
+  # in the hill-climbing group below.
+
+  - id: total-revenue
+    prompt: "What is our total revenue?"
+    attempts: 2
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      # Endorsed total_revenue = SUM(sale_price) where the order's status is 'Complete'.
+      - id: revenue-numeric
+        type: numeric_value
+        target:
+          sql: "select sum(o.SALE_PRICE) from hex_app_data.A_TEST_SCHEMA.FCT_ORDERS o join hex_app_data.A_TEST_SCHEMA.DIM_ORDER_STATUS d on try_to_number(o.ORDER_ID) = d.ORDER_ID where d.STATUS = 'Complete'"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        tolerancePercentage: 0.5
+      - id: used-endorsed-definition
+        type: judge_thread
+        criterion: "Did the agent use the endorsed total_revenue definition — sum of sale_price restricted to Completed orders (status = 'Complete') — rather than summing sale_price across all orders regardless of status?"
+      - id: reports-endorsed-figure
+        type: judge_final_answer
+        criterion: "Does the final answer report total revenue of approximately $1,372.50 (the endorsed Completed-orders figure), not ~$7,000 gross?"
+
+  - id: top-traffic-source
+    prompt: "Which traffic source brings in the most customers?"
+    # 3 attempts: this case is a known coin-flip — the agent sometimes stops to
+    # ask registered-users vs purchasers instead of answering. 2 attempts can
+    # pass by luck and hide it.
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: names-search
+        type: judge_final_answer
+        criterion: "Does the final answer identify 'Search' as the top traffic source by customer count?"
+        expected: "Search"
+      - id: search-count-numeric
+        type: numeric_value
+        target:
+          sql: "select count(*) from hex_app_data.A_TEST_SCHEMA.DIM_USERS where TRAFFIC_SOURCE = 'Search'"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        absoluteTolerance: 0
+        warnOnly: true
+        # The guide now tells the agent to lead with registered users and offer
+        # the purchasers-only cut afterwards, so answers carry two counts.
+        extractionGuidance: "Extract the count of registered users acquired via the Search traffic source (the headline figure), not any purchasers-only or second-population count."
+
+  # REMOVED 2026-08-14: top-state ("Which state has the most customers, and how
+  # many?" → Guangdong). A count(*) group-by that guarded no definition and
+  # passed every run. Replaced by churn-definition-unpinned below.
+
+  - id: distinct-orders
+    prompt: "How many orders do we have?"
+    attempts: 2
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      # Endorsed order grain = distinct orders (header level) = 998, per DIM_ORDER_STATUS.
+      - id: orders-numeric
+        type: numeric_value
+        target:
+          sql: "select count(*) from hex_app_data.A_TEST_SCHEMA.DIM_ORDER_STATUS"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        absoluteTolerance: 0
+      - id: uses-distinct-order-grain
+        type: judge_thread
+        criterion: "Did the agent report the distinct/header-level order count of 998 (from the certified orders model / DIM_ORDER_STATUS), rather than the 1000 raw line rows in FCT_ORDERS?"
+
+  - id: return-rate
+    prompt: "What is our order return rate?"
+    attempts: 2
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      # Canonical definition (Rachel, 2026-08-13): return rate = returned orders
+      # divided by DELIVERED orders — the ones that actually reached the customer,
+      # i.e. status in ('Complete','Returned') = 204 + 90 = 294. 90/294 = ~30.6%.
+      # This metric is currently UNPINNED in context, so the agent improvises two
+      # denominators. Fork/guide should pin it; then this case flips to pass.
+      - id: rate-is-delivered-based
+        type: judge_final_answer
+        criterion: "Does the final answer give a return rate of approximately 30.6% — 90 returned orders divided by delivered orders (those that reached the customer: Complete + Returned = 294)?"
+      - id: defined-returns-correctly
+        type: judge_thread
+        criterion: "Did the agent compute return rate as returned orders (status = 'Returned' = 90) over DELIVERED orders (status in ('Complete','Returned') = 294, i.e. orders with a delivered date), rather than dividing by all 998 orders or by completed-only (204)?"
+      - id: return-rate-numeric
+        type: numeric_value
+        target:
+          sql: "select 100.0 * count_if(STATUS = 'Returned') / count_if(STATUS in ('Complete','Returned')) from hex_app_data.A_TEST_SCHEMA.DIM_ORDER_STATUS"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        tolerancePercentage: 3
+        extractionGuidance: "Extract the return rate expressed as a percentage of delivered orders (e.g. 30.6)."
+
+  # ────────── [PINNED DEFINITION] churn ──────────
+  # The churn window IS defined in context:
+  #     "- Churn: no qualifying order in the last 90 days."
+  # lives in hex-guides/user_retention.md (restored via rherrera89/hex-guides#6,
+  # 2026-08-14). This case verifies the agent reads that 90-day window straight
+  # from the guide and presents it as the endorsed standard.
+  #
+  # History / why the rubrics look the way they do: the churn line was briefly
+  # removed (PR #5), and against that context the agent improvised a different
+  # window every run (12mo / 180d / monthly cohort) and never landed on 90.
+  # Pinning the line fixed it — verified in preview 01a001d0 (uses-90-day-window
+  # flipped 0/3 -> 2/3). While the removal was live, an earlier rubric
+  # (surfaces-improvised-definition) demanded the agent flag churn as "not
+  # pinned"; now that it IS pinned, that rubric is inverted and has been replaced
+  # by cites-endorsed-definition below — the agent should now treat the 90-day
+  # window as endorsed, not hedge about it.
+  #
+  # "Qualifying order" is also defined in the guide (Status = 'Complete' AND
+  # RETURNED_AT IS NULL), which the agent already applies correctly.
+  - id: churn-definition
+    prompt: "What's our customer churn rate?"
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: uses-90-day-window
+        type: judge_thread
+        criterion: "Did the agent use a 90-day window for churn — a user is churned with no qualifying order in the last 90 days? Expressing this equivalently as 'most recent qualifying order more than 90 days ago' / a last-qualifying-order-date cutoff at 90 days is a PASS (it is the same rule). A FAIL is a DIFFERENT threshold — 30, 60, or 180 days, 6 or 12 months — or a recency cut at some other cutoff."
+      - id: uses-qualifying-order-definition
+        type: judge_thread
+        criterion: "Did the agent use the guide's 'qualifying order' definition — Status = 'Complete' AND RETURNED_AT IS NULL — rather than the model's completed_orders measure, which does NOT exclude later-returned orders?"
+      - id: cites-endorsed-definition
+        type: judge_final_answer
+        criterion: "Does the final answer present the 90-day churn window as the workspace's endorsed/canonical definition — e.g. attributing it to the retention guide (user_retention.md) — rather than improvising a window or hedging that no definition is pinned? Flagging the definition as NOT pinned, or asking the user to choose a window before answering, is now a FAIL."
+
+  # REMOVED 2026-08-14: degenerate-7day-return-metric ("What's our 7-day return
+  # rate?"). return_7d_rate_vs_delivered is exactly equal to return_rate_vs_
+  # delivered (both 90/294 = 30.6%) and the underlying timestamps are corrupt,
+  # but the agent caught all of it unaided, 3/3, on run 01a00194. It graded as a
+  # guard rather than a hill climb, so it was cut in the 2026-08-14 cleanup.
+  # Full case preserved in evals/.archive/ecommerce-pre-cleanup-2026-08-14.yaml.
+
+  - id: status-breakdown
+    prompt: "Break down orders by their status."
+    attempts: 2
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: uses-certified-status
+        type: judge_thread
+        criterion: "Did the agent use the certified status field (dim_order_status.status), which yields cleaned labels including 'Cancelled', rather than the raw FCT_ORDERS \"Status\" column, which is NULL for the 190 cancelled orders and contains no 'Cancelled' value at all?"
+      - id: lists-all-statuses
+        type: judge_final_answer
+        criterion: "Does the final answer list the five status values — Shipped (270), Processing (244), Complete (204), Cancelled (190), Returned (90) — with counts, and NOT a NULL/None/blank bucket?"
+      # NOTE: dropped the numeric_value shipped-count rubric — numeric extraction
+      # from a 5-row breakdown unreliably grabbed the 998 total instead of 270,
+      # false-failing a correct answer. The judge above already validates counts.
+
+  - id: sales-all-orders-override
+    prompt: "What were total sales across ALL orders, regardless of status? I want the gross figure, not just completed orders."
+    # 3 attempts: known coin-flip. The model cannot express gross (total_revenue
+    # is hard-filtered is_complete), so the agent sometimes stops to ask for SQL
+    # approval / cancellation netting instead of answering.
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      # When the user explicitly overrides the endorsed default, the agent should
+      # give gross sale_price across all orders (~$7,051.75), not the $1,372.50 default.
+      - id: gross-numeric
+        type: numeric_value
+        target:
+          sql: "select sum(SALE_PRICE) from hex_app_data.A_TEST_SCHEMA.FCT_ORDERS"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        tolerancePercentage: 0.5
+        # The guide now tells the agent to quote certified total_revenue
+        # ($1,372.50) alongside gross for contrast, so two figures appear.
+        extractionGuidance: "Extract the gross all-status sales total (~7051.75), not the certified completed-only total_revenue figure (~1372.50) quoted alongside it for contrast."
+      - id: honored-override
+        type: judge_thread
+        criterion: "Did the agent recognize the user explicitly asked for gross across all statuses and sum sale_price over all orders (~$7,051.75), instead of applying the endorsed Completed-only total_revenue default (~$1,372.50)?"
+
+  # ──────── [JUDGMENT] incomplete trailing period ────────
+  # Replaces campaign-count. Nothing here is a metric-definition problem:
+  # total_orders is well defined and the agent can compute the series with or
+  # without the semantic model. The question is a JUDGMENT call the data cannot
+  # answer on its own — is the last period complete enough to draw a trend from?
+  #
+  # Ground truth (2026-08-14): FCT_ORDERS.CREATED_AT spans 2022-09-07 to
+  # 2026-06-19. June 2026 is therefore only 19 of 30 days — 63% elapsed.
+  #   Distinct orders/month: Nov 45, Dec 41, Jan 40, Feb 48, Mar 62, Apr 69,
+  #                          May 68, Jun 68 (PARTIAL)
+  #   Complete-only:         Nov  7, Dec 11, Jan  8, Feb 11, Mar  9, Apr 18,
+  #                          May 13, Jun 11 (PARTIAL)
+  # The naive read is "flat" (68 → 68), and on completed orders it looks like a
+  # DECLINE (13 → 11). Pro-rated, June is tracking ~107 orders — a sharp
+  # acceleration. An agent that reports the series as-is tells the user the
+  # exact opposite of what is happening.
+  #
+  # Secondary judgment: the data ends 2026-06-19 but "today" is 2026-08-14, so
+  # the dataset is ~8 weeks stale and cannot speak to current growth at all.
+  #
+  # Why a guide, not the model: no measure or dimension can encode "check
+  # whether the trailing period is complete before reporting a trend". This is
+  # analytical method. Related open suggestion: "Reporting calendar conventions"
+  # (019ffa94-6ba8-75ab-a140-955f0816aaad), which covers period DEFINITION;
+  # this case covers period COMPLETENESS.
+  - id: growth-trend-partial-period
+    prompt: "Is our order growth slowing down?"
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: flags-partial-final-period
+        type: judge_final_answer
+        criterion: "Does the answer identify that the most recent month in the data (June 2026) is incomplete — orders stop on 2026-06-19, only 19 days into a 30-day month — and avoid presenting it as a full month alongside the complete ones?"
+      - id: no-false-flatline
+        type: judge_final_answer
+        criterion: "Does the answer AVOID concluding that growth is flat, slowing, or declining on the basis of the partial final month? Comparing June's raw 68 orders to May's 68 (or completed 11 vs 13) and calling it flat or down is a FAIL. Passing = June is excluded, pro-rated, or explicitly caveated before any trend claim is made."
+      - id: trend-on-complete-periods
+        type: judge_thread
+        criterion: "Did the agent build its trend judgment from complete periods (through May 2026) or explicitly normalize the partial month, rather than feeding the raw monthly series — partial month included — straight into a growth conclusion?"
+      - id: notes-data-staleness
+        type: judge_final_answer
+        warnOnly: true
+        criterion: "Does the answer note that the dataset ends 2026-06-19, roughly two months before the current date, and therefore cannot speak to present-day growth? Quality bar on transparency — warnOnly."
+
+  # ────────── [REGRESSION GUARD — validated] dead table ──────────
+  # MEASURED 2026-08-14 (run 01a00183): PASSED 3/3. Built as a hill-climbing
+  # trap; the agent already handles it. It ran a join diagnostic (JOIN_INV_ITEM
+  # = 0), refused to answer — "I can't answer this one from the available data"
+  # — and surfaced it as a data defect. No guide fix needed. Kept as a BASELINE
+  # guard: if a future context change ever teaches the agent to answer this
+  # question, it will be answering with garbage, and this case will catch it.
+  # Product category/brand/department live ONLY in FCT_ORDER_INVENTORY, so this
+  # question forces the agent into it. The table has 10 rows and
+  # FCT_ORDERS.INVENTORY_ITEM_ID matches 0 of them: an inner join returns $0.00
+  # and 0 orders, silently and without error.
+  #
+  # Why this cannot be fixed in the semantic model: FCT_ORDER_INVENTORY is not
+  # IN the model. No measure, dimension, or join added to orders_view can stop
+  # the agent from reaching a table that sits outside it. The only fixes are a
+  # guide that names the table as unusable, or a warehouse-level exclusion.
+  #
+  # Passing behavior is to REPORT THAT THE QUESTION CANNOT BE ANSWERED. There is
+  # deliberately no numeric rubric here — any number is a wrong answer.
+  - id: product-category-dead-table
+    prompt: "Which product category drives the most sales?"
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: no-phantom-ranking
+        type: judge_final_answer
+        criterion: "Does the final answer AVOID presenting a product-category sales ranking, a category name, or a dollar figure as a valid result? Category data exists only in FCT_ORDER_INVENTORY, which has 10 rows and matches 0 of 1,000 order lines, so any ranking — including one built from the 10 orphan inventory rows — is unsupported. PASS = the agent states the question cannot be answered from this data."
+      - id: identifies-broken-join
+        type: judge_thread
+        criterion: "Did the agent discover that FCT_ORDERS.INVENTORY_ITEM_ID matches zero rows in FCT_ORDER_INVENTORY and treat that as a data defect worth surfacing, rather than accepting an empty or $0.00 result as the answer?"
+      - id: no-silent-zero
+        type: judge_final_answer
+        criterion: "Does the answer avoid reporting $0.00, 'no sales', or an empty result as a genuine business finding?"
+
+  # ───── [REGRESSION GUARD — validated] lying raw column under SQL ─────
+  # MEASURED 2026-08-14 (run 01a00183): PASSED 3/3, exact numeric match
+  # ($1,429.75 across 190 orders). The workspace SQL Fallback Guardrails already
+  # pin the cancellation source, and the agent called DIM_ORDER_STATUS "the
+  # sanctioned cancellation source" unprompted. No guide fix needed. Kept as a
+  # BASELINE guard — it is the closest coverage we have over the cancellation
+  # sourcing rule, and the pending gross-sales guide edit touches that area.
+  # The model cannot answer this (total_revenue is hard-filtered to Complete),
+  # so the loosened policy sends the agent to SQL — which is exactly where the
+  # trap is. Naive SQL filters FCT_ORDERS."Status" = 'Cancelled' and matches
+  # NOTHING: that column is NULL for all 190 cancelled orders and has no
+  # 'Cancelled' value. Correct sourcing joins DIM_ORDER_STATUS.
+  #
+  # Why this cannot be fixed in the semantic model: the agent is in raw SQL by
+  # the time it hits the trap. A new model measure is simply not consulted. The
+  # guide has to say that raw "Status" is unreliable and where cancellations live.
+  - id: cancelled-order-value
+    prompt: "How much order value is tied up in cancelled orders?"
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      # DOWNGRADED to warnOnly 2026-08-14 (run 01a00194): this rubric fights a
+      # workspace rule. One attempt of three reported -$1,429.75 — correctly
+      # applying the SQL Fallback Guardrail that sign-flips cancelled monetary
+      # values — and the rubric failed it for not being positive. The magnitude
+      # was right; the sign convention is genuinely ambiguous for a "how much is
+      # tied up" question, and the eval should not quietly overrule a pinned
+      # guardrail. The two judge rubrics below still carry the real signal.
+      # Resolve properly by pinning in the guide whether "value tied up in
+      # cancelled orders" is a positive magnitude or a sign-flipped figure, then
+      # restore this to a hard rubric.
+      - id: cancelled-value-numeric
+        type: numeric_value
+        warnOnly: true
+        target:
+          sql: "select sum(o.SALE_PRICE) from hex_app_data.A_TEST_SCHEMA.FCT_ORDERS o join hex_app_data.A_TEST_SCHEMA.DIM_ORDER_STATUS d on try_to_number(o.ORDER_ID) = d.ORDER_ID where d.STATUS = 'Cancelled'"
+          dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+          timeoutSeconds: 30
+        tolerancePercentage: 0.5
+        extractionGuidance: "Extract the single headline total dollar value of cancelled orders (magnitude ~1429.75), ignoring sign. Do not extract the count of cancelled orders (190), the average order value, or any per-status subtotal."
+      - id: sourced-cancellations-correctly
+        type: judge_thread
+        criterion: "Did the agent source cancelled orders from DIM_ORDER_STATUS (status = 'Cancelled', 190 orders), rather than filtering or grouping the raw FCT_ORDERS \"Status\" column — which is NULL for every cancelled order and contains no 'Cancelled' value?"
+      - id: no-false-zero
+        type: judge_final_answer
+        criterion: "Does the final answer report a real non-zero dollar figure covering roughly 190 cancelled orders, and NOT claim there are zero cancelled orders, no cancellation data, or $0 of cancelled value?"
+
+  # ─────────────────────── HILL-CLIMBING ───────────────────────
+
+  # ───────────────── HARD SYNTHESIS — quarterly planning ─────────────────
+  # Open-ended and multi-step: no single query answers it. This grades ANALYTICAL
+  # METHOD, which a semantic model structurally cannot encode — hence judge-only,
+  # no numeric rubric.
+  #
+  # The judgment calls the agent must navigate, none of them pinned today:
+  #  - DIM_CAMPAIGNS has NO order or user key. Attribution runs only through
+  #    DIM_USERS.FIRST_TOUCH_CAMPAIGN_ID / LAST_TOUCH_CAMPAIGN_ID, and first-touch
+  #    vs last-touch is an unpinned choice that changes the ranking.
+  #  - Several of the 25 campaigns have STATUS = 'Planned' and never ran; scoring
+  #    them on performance is meaningless.
+  #  - Volume and quality diverge. Search is the dominant source (689 users) but
+  #    returns at 32.4% vs ~30.6% overall — headline volume overstates its worth.
+  #    Organic is much smaller (145) but returns at only 21.1%.
+  #  - State-level cuts rest on 10-15 delivered orders each (Texas 41.7% on 12
+  #    delivered). Not decision-grade, and a good answer says so.
+  - id: quarterly-planning-synthesis
+    prompt: "We're doing quarterly planning and I want to understand what areas of the business I need to be most concerned with, and where I should target my marketing effort."
+    attempts: 3
+    attachments:
+      dataConnectionId: "019c6d3b-2c60-700d-b232-101680e18c25"
+    rubrics:
+      - id: establishes-sales-baseline
+        type: judge_thread
+        criterion: "Did the agent establish a baseline of actual sales performance — order volume and revenue, using the certified definitions — before making recommendations, rather than jumping straight to marketing advice?"
+      # Recalibrated 2026-08-14 after run 01a00183: the original wording also
+      # required the agent to NARRATE the DIM_CAMPAIGNS→DIM_USERS linkage, and
+      # failed a run that correctly used last-touch and labelled every cut "By
+      # last-touch channel". That graded disclosure, not method. Correct
+      # application + naming the basis now passes; narrating the limitation is
+      # split into the warnOnly rubric below.
+      - id: evaluates-campaigns-with-attribution
+        type: judge_thread
+        criterion: "Did the agent examine campaign performance using a defensible attribution path (via DIM_USERS.FIRST_TOUCH_CAMPAIGN_ID or LAST_TOUCH_CAMPAIGN_ID / the users_view campaign groups) AND name which attribution basis it used? Silently ranking campaigns by budget, or asserting a direct campaign-to-order join that does not exist, is a fail."
+      - id: surfaces-attribution-limitation
+        type: judge_final_answer
+        warnOnly: true
+        criterion: "Does the answer explicitly tell the user that DIM_CAMPAIGNS has no direct link to orders, so campaign performance is attribution-dependent and first-touch vs last-touch would change the ranking? This is a quality bar on transparency, not correctness — warnOnly."
+      - id: excludes-unrun-campaigns
+        type: judge_thread
+        criterion: "Did the agent notice that some campaigns have STATUS = 'Planned' and never ran, and exclude or flag them rather than scoring them as if they had performance?"
+      - id: calibrates-quality-against-returns
+        type: judge_final_answer
+        criterion: "Does the answer calibrate acquisition volume against return behavior to separate genuine demand from buy-then-return customers — rather than recommending targets purely on customer or order counts? Concretely: does it recognize that Search dominates on volume (689 customers) but returns above the ~30.6% overall rate (32.4%), while a smaller source like Organic (145 customers) returns at only ~21.1%, and let that shape the recommendation?"
+      - id: concrete-ranked-recommendation
+        type: judge_final_answer
+        criterion: "Does the answer end with a specific, ranked recommendation — naming actual traffic sources, regions, or campaign types drawn from this data, and naming the concerns worth worrying about — rather than generic advice like 'monitor your funnel' or 'invest in high-performing channels'?"
+      # Recalibrated 2026-08-14 after run 01a00183: the original wording demanded
+      # a STATE-level caveat (Texas ~41.7% on 12 delivered), but the agent cut by
+      # country, not state — so it was being failed for not caveating an analysis
+      # it had no reason to run, despite hedging appropriately on the cuts it did
+      # present. Now cut-agnostic: it grades whether fine-grained segments carry a
+      # sample-size caveat, whichever segmentation the agent chose.
+      - id: hedges-thin-samples
+        type: judge_final_answer
+        criterion: "For whatever fine-grained geographic or segment cuts the answer presents (state, country, channel, or campaign), does it flag that those slices rest on very small denominators — typically 10-15 delivered orders each — and avoid presenting them as decision-grade findings? Broad, non-specific caveats about overall data volume are acceptable only if they clearly attach to the specific cuts being recommended on."
